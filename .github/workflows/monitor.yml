@@ -1,7 +1,4 @@
-name: monitor
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       drill:
