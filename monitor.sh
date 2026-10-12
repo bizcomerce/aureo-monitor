@@ -60,7 +60,7 @@ run checkout-en c_chk "$CHK_EN"; run checkout-it c_chk "$CHK_IT"
 run p06-l3 c_l3; run b0 c_b0; run tls c_tls; run collector-dead-man c_dead
 
 key=$(printf '%s\n' "${FAILS[@]:-}" | sed 's/:.*//' | sort | tr '\n' ',' ); key=${key%,}
-last=$(poll "$ALERT_T" 6h | tail -1); lt=${last%% *}; lm=${last#* }; now=$(date +%s)
+last=$(poll "$ALERT_T" 6h | grep -E "^[0-9]+ (ALERT|RECOVERED)" | tail -1); lt=${last%% *}; lm=${last#* }; now=$(date +%s)
 pub() { curl -sS -m 15 -o /dev/null -H "Title: AUREO $1" -H "Priority: $2" -d "$3" "$NTFY/$ALERT_T" || echo "ALERT DELIVERY FAILED"; }
 if [ -n "$key" ]; then
   detail=$(printf '%s; ' "${FAILS[@]}")
