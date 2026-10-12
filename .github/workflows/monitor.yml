@@ -23,6 +23,7 @@ jobs:
           CANARY_PATH: ${{ secrets.CANARY_PATH }}
           KEYLESS_PATH: ${{ secrets.KEYLESS_PATH }}
           DRILL_CART_PATH: ${{ github.event.inputs.drill == 'cart' && '/aureo-drill-nonexistent-cart/' || '' }}
-          DRILL_HB_BASE: ${{ github.event.inputs.drill == 'collector' && format('{0}-drill', secrets.NTFY_BASE) || '' }}
+          DRILL_HB_PATH: ${{ github.event.inputs.drill == 'collector' && '/aureo-drill-nonexistent-hb.txt' || '' }}
+          HB_PATH: ${{ secrets.HB_PATH }}
           DRILL_MON_BASE: ${{ github.event.inputs.drill != '' && 'drill' || '' }}
         run: bash monitor.sh

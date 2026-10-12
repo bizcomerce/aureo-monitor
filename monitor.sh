@@ -10,7 +10,7 @@ BASE=${BASE:-https://aureo-collection.com}
 CART_EN=${CART_EN:-/cart/}; CART_IT=${CART_IT:-/it/cart-it/}; CHK_EN=${CHK_EN:-/checkout/}; CHK_IT=${CHK_IT:-/it/checkout-it/}
 [ -n "${DRILL_CART_PATH:-}" ] && CART_EN=$DRILL_CART_PATH
 NTFY=https://ntfy.sh
-: "${NTFY_BASE:?NTFY_BASE missing}"
+: "${NTFY_BASE:?NTFY_BASE missing}"; : "${HB_PATH:?HB_PATH missing}"
 ALERT_T="${NTFY_BASE}-alert"; HB_T="${DRILL_HB_BASE:-$NTFY_BASE}-hb"; MON_T="${NTFY_BASE}-mon"
 FAILS=(); NOTES=(); SHED=()
 # duplicate-run guard: native schedule and the external scheduler may both fire; skip when a full run completed in the last 150 s
@@ -54,7 +54,10 @@ c_tls()   { local host=${BASE#https://} end d
   [ -n "$end" ] || { echo "tls_unreadable"; return; }
   d=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 )); [ "$d" -ge 14 ] || echo "tls_${d}d_left"; NOTES+=("tls_days=$d"); }
 poll() { curl -sS -m 15 "$NTFY/$1/json?poll=1&since=$2" 2>/dev/null | jq -r 'select(.event=="message") | "\(.time) \(.message)"' 2>/dev/null; }
-c_dead()  { local n; n=$(poll "$HB_T" 40m | wc -l); [ "$n" -ge 1 ] || echo "collector_heartbeat_missing_40m"; }
+c_dead()  { # pull-based collector heartbeat: public file holding one epoch, rewritten by the on-host collector every minute
+  local p=${DRILL_HB_PATH:-$HB_PATH} body ep age; body=$(curl -sS -m 15 -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' -A "$UA" "$BASE$p?c=$RANDOM$RANDOM" 2>/dev/null | head -c 40)
+  ep=$(printf '%s' "$body" | tr -d ' \r\n'); case "$ep" in ''|*[!0-9]*) echo "collector_heartbeat_unreadable"; return;; esac
+  age=$(( $(date +%s) - ep )); NOTES+=("collector_hb_age_s=$age"); [ "$age" -le 2400 ] || echo "collector_heartbeat_stale_${age}s"; }
 
 run() { # name fn arg  (one retry after 20 s so a single dropped request never pages)
   local r; r=$("$2" "${3:-}"); if [ -n "$r" ]; then sleep 20; r=$("$2" "${3:-}"); fi
