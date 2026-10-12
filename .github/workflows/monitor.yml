@@ -1,0 +1,30 @@
+name: monitor
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      drill:
+        description: "empty | cart (bad cart path) | collector (wrong heartbeat topic)"
+        required: false
+        default: ""
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - name: probe
+        env:
+          NTFY_BASE: ${{ secrets.NTFY_BASE }}
+          CANARY_PATH: ${{ secrets.CANARY_PATH }}
+          KEYLESS_PATH: ${{ secrets.KEYLESS_PATH }}
+          DRILL_CART_PATH: ${{ github.event.inputs.drill == 'cart' && '/aureo-drill-nonexistent-cart/' || '' }}
+          DRILL_HB_BASE: ${{ github.event.inputs.drill == 'collector' && format('{0}-drill', secrets.NTFY_BASE) || '' }}
+          DRILL_MON_BASE: ${{ github.event.inputs.drill != '' && 'drill' || '' }}
+        run: bash monitor.sh
