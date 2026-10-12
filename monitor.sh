@@ -54,7 +54,7 @@ c_tls()   { local host=${BASE#https://} end d
   [ -n "$end" ] || { echo "tls_unreadable"; return; }
   d=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 )); [ "$d" -ge 14 ] || echo "tls_${d}d_left"; NOTES+=("tls_days=$d"); }
 poll() { curl -sS -m 15 "$NTFY/$1/json?poll=1&since=$2" 2>/dev/null | jq -r 'select(.event=="message") | "\(.time) \(.message)"' 2>/dev/null; }
-c_dead()  { local n; n=$(poll "$HB_T" 15m | wc -l); [ "$n" -ge 1 ] || echo "collector_heartbeat_missing_15m"; }
+c_dead()  { local n; n=$(poll "$HB_T" 25m | wc -l); [ "$n" -ge 1 ] || echo "collector_heartbeat_missing_25m"; }
 
 run() { # name fn arg  (one retry after 20 s so a single dropped request never pages)
   local r; r=$("$2" "${3:-}"); if [ -n "$r" ]; then sleep 20; r=$("$2" "${3:-}"); fi
