@@ -13,6 +13,11 @@ NTFY=https://ntfy.sh
 : "${NTFY_BASE:?NTFY_BASE missing}"
 ALERT_T="${NTFY_BASE}-alert"; HB_T="${DRILL_HB_BASE:-$NTFY_BASE}-hb"; MON_T="${NTFY_BASE}-mon"
 FAILS=(); NOTES=(); SHED=()
+# duplicate-run guard: native schedule and the external scheduler may both fire; skip when a full run completed in the last 150 s
+if [ -z "${DRILL_MON_BASE:-}" ] && [ "${FORCE_RUN:-}" != 1 ]; then
+  lastmon=$(curl -sS -m 15 "$NTFY/$MON_T/json?poll=1&since=3m" 2>/dev/null | jq -r 'select(.event=="message")|.time' 2>/dev/null | tail -1)
+  if [ -n "$lastmon" ] && [ $(( $(date +%s) - lastmon )) -lt 150 ]; then echo "duplicate run guard: last run $(( $(date +%s) - lastmon )) s ago, skipping"; exit 0; fi
+fi
 ts() { date -u +%FT%TZ; }
 
 # fetch <path> -> sets F_CODE F_TTFB F_TOTAL F_LOC F_BYTES F_MARK F_WALL F_L3 F_GATE
