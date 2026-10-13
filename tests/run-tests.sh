@@ -38,4 +38,6 @@ sc '500|||deny';                        t absent-500 "filtered_http_500" c_b0
 sc '200|||page|12';                     t absent-slow "filtered_slow" c_b0
 sc '200|||page|0.1'; export SHOP_CODE=503; t absent-shop-down "shop_503" c_b0; export SHOP_CODE=200
 unset B0_EXPECT; sc '503|deny-expensive||deny'; t default-is-present "" c_b0
+# shed/notes survive the $(...) subshell of run()
+SIDE=$(mktemp); B0_EXPECT=absent; sc "429|shed-F||deny"; r=$(c_b0); t side-shed "S F429:shed-F" grep -x "S F429:shed-F" "$SIDE"; rm -f "$SIDE"
 echo "pass $P fail $F"; [ "$F" = 0 ]

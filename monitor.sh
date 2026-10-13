@@ -12,7 +12,8 @@ CART_EN=${CART_EN:-/cart/}; CART_IT=${CART_IT:-/it/cart-it/}; CHK_EN=${CHK_EN:-/
 NTFY=https://ntfy.sh
 : "${NTFY_BASE:?NTFY_BASE missing}"; : "${HB_PATH:?HB_PATH missing}"
 ALERT_T="${NTFY_BASE}-alert"; HB_T="${DRILL_HB_BASE:-$NTFY_BASE}-hb"; MON_T="${NTFY_BASE}-mon"
-FAILS=(); NOTES=(); SHED=()
+FAILS=(); NOTES=(); SHED=(); SIDE=$(mktemp)   # checks run in $(...) subshells: they report shed/notes through this file
+note() { echo "$1 $2" >>"$SIDE"; }
 # duplicate-run guard: native schedule and the external scheduler may both fire; skip when a full run completed in the last 150 s
 if [ -z "${DRILL_MON_BASE:-}" ] && [ "${FORCE_RUN:-}" != 1 ]; then
   lastmon=$(curl -sS -m 15 "$NTFY/$MON_T/json?poll=1&since=3m" 2>/dev/null | jq -r 'select(.event=="message")|.time' 2>/dev/null | tail -1)
@@ -40,13 +41,13 @@ c_cart()  { fetch "$1"; [ -n "$F_WALL" ] && { echo "wall_denied_transactional"; 
   [ "$F_CODE" = 200 ] || { echo "cart_http_$F_CODE"; return; }
   [ "$F_BYTES" -ge 2000 ] || { echo "cart_small"; return; }
   [ "$F_MARK" = 1 ] || { echo "cart_marker_missing"; return; }
-  over "$F_TTFB" 10 && { echo "cart_slow"; return; }; SHED+=("${F_GATE:-}"); }
+  over "$F_TTFB" 10 && { echo "cart_slow"; return; }; note S "${F_GATE:-}"; }
 c_chk()   { fetch "$1"; [ -n "$F_WALL" ] && { echo "wall_denied_transactional"; return; }
   case "$F_CODE" in 301|302|303|307|308) ;; *) echo "checkout_http_$F_CODE"; return;; esac
   case "$F_LOC" in */cart/|*/cart-it/|*cart*) ;; *) echo "checkout_redirect_not_cart"; return;; esac
   over "$F_TTFB" 10 && { echo "checkout_slow"; return; }; }
 c_l3()    { fetch "$KEYLESS_PATH"; [ "$F_CODE" = 400 ] || { echo "l3_keyless_http_$F_CODE"; return; }
-  [ -n "$F_L3" ] || { echo "l3_header_missing"; return; }; SHED+=("L3:$F_L3"); }
+  [ -n "$F_L3" ] || { echo "l3_header_missing"; return; }; note S "L3:$F_L3"; }
 c_b0_present() { fetch "$CANARY_PATH"; [ "$F_CODE" = 503 ] && [ -n "$F_WALL" ] || { echo "b0_not_denying_$F_CODE"; return; }
   over "$F_TTFB" 2 && { echo "b0_slow"; return; }
   fetch /shop/; [ "$F_CODE" = 200 ] && [ -z "$F_WALL" ] || echo "shop_$F_CODE"; }
@@ -58,7 +59,7 @@ c_b0_absent() { fetch "$CANARY_PATH"
   [ "$F_CHAL" = 1 ] && { echo "filter_challenge_page_served"; return; }
   case "$F_CODE" in
     200) [ "$F_BYTES" -ge 2000 ] || { echo "filtered_200_small_${F_BYTES}B"; return; }; [ -z "$F_WALL" ] || { echo "filtered_200_wall_$F_WALL"; return; };;
-    429) case "$F_WALL" in shed-F*) ;; *) [ -n "$F_L3" ] || { echo "filtered_429_unrecognised"; return; };; esac; SHED+=("F429:${F_WALL:-$F_L3}");;
+    429) case "$F_WALL" in shed-F*) ;; *) [ -n "$F_L3" ] || { echo "filtered_429_unrecognised"; return; };; esac; note S "F429:${F_WALL:-$F_L3}";;
     *) echo "filtered_http_$F_CODE"; return;;
   esac
   over "$F_TTFB" 10 && { echo "filtered_slow"; return; }
@@ -67,12 +68,12 @@ c_b0()    { if [ "${B0_EXPECT:-present}" = absent ]; then c_b0_absent; else c_b0
 c_tls()   { local host=${BASE#https://} end d
   end=$(echo | timeout 15 openssl s_client -servername "$host" -connect "$host:443" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
   [ -n "$end" ] || { echo "tls_unreadable"; return; }
-  d=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 )); [ "$d" -ge 14 ] || echo "tls_${d}d_left"; NOTES+=("tls_days=$d"); }
+  d=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 )); [ "$d" -ge 14 ] || echo "tls_${d}d_left"; note N "tls_days=$d"; }
 poll() { curl -sS -m 15 "$NTFY/$1/json?poll=1&since=$2" 2>/dev/null | jq -r 'select(.event=="message") | "\(.time) \(.message)"' 2>/dev/null; }
 c_dead()  { # pull-based collector heartbeat: public file holding one epoch, rewritten by the on-host collector every minute
   local p=${DRILL_HB_PATH:-$HB_PATH} body ep age; body=$(curl -sS -m 15 -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' -A "$UA" "$BASE$p?c=$RANDOM$RANDOM" 2>/dev/null | head -c 40)
   ep=$(printf '%s' "$body" | tr -d ' \r\n'); case "$ep" in ''|*[!0-9]*) echo "collector_heartbeat_unreadable"; return;; esac
-  age=$(( $(date +%s) - ep )); NOTES+=("collector_hb_age_s=$age"); [ "$age" -le 2400 ] || echo "collector_heartbeat_stale_${age}s"; }
+  age=$(( $(date +%s) - ep )); note N "collector_hb_age_s=$age"; [ "$age" -le 2400 ] || echo "collector_heartbeat_stale_${age}s"; }
 
 [ "${MONITOR_LIB:-}" = 1 ] && return 0 2>/dev/null   # test hook: load the check functions only
 run() { # name fn arg  (one retry after 20 s so a single dropped request never pages)
@@ -96,5 +97,6 @@ else
 fi
 # monitor liveness for the on-host dead-man (published only when the run completed)
 [ -z "${DRILL_MON_BASE:-}" ] && curl -sS -m 10 -o /dev/null -d "ok $(ts)" "$NTFY/$MON_T"
+while read -r k v; do case "$k" in S) SHED+=("$v");; N) NOTES+=("$v");; esac; done <"$SIDE"; rm -f "$SIDE"
 { echo "### AUREO external monitor $(ts)"; echo "result: ${key:-ALL PASS}"; echo "shed/gate: ${SHED[*]:-n/a}"; echo "${NOTES[*]:-}"; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
 [ -z "$key" ]
