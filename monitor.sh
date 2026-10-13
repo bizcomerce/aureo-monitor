@@ -86,7 +86,10 @@ run p06-l3 c_l3; run b0 c_b0; run tls c_tls; run collector-dead-man c_dead
 
 key=$(printf '%s\n' "${FAILS[@]:-}" | sed 's/:.*//' | sort | tr '\n' ',' ); key=${key%,}
 last=$(poll "$ALERT_T" 6h | grep -E "^[0-9]+ (ALERT|RECOVERED)" | tail -1); lt=${last%% *}; lm=${last#* }; now=$(date +%s)
-pub() { curl -sS -m 15 -o /dev/null -H "Title: AUREO $1" -H "Priority: $2" -d "$3" "$NTFY/$ALERT_T" || echo "ALERT DELIVERY FAILED"; }
+pub() { local c i; for i in 1 2 3; do   # verify the HTTP status: a 429/5xx must never look like a delivered alert
+    c=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -H "Title: AUREO $1" -H "Priority: $2" -d "$3" "$NTFY/$ALERT_T" 2>/dev/null) || c=000
+    [ "$c" = 200 ] && { echo "ntfy alert delivery http 200"; return 0; }; echo "ntfy alert delivery http $c (try $i)"; sleep 5; done
+  echo "ALERT DELIVERY FAILED"; DELIVERY_FAILED=1; return 1; }
 if [ -n "$key" ]; then
   detail=$(printf '%s; ' "${FAILS[@]}")
   if [ "${lm%% *}" = ALERT ] && [ "${lm#ALERT }" != "$lm" ] && [ "$(echo "$lm" | sed -n 's/^ALERT \([^ ]*\) .*/\1/p')" = "$key" ] && [ $((now-${lt:-0})) -lt 3600 ]; then
@@ -99,4 +102,4 @@ fi
 [ -z "${DRILL_MON_BASE:-}" ] && curl -sS -m 10 -o /dev/null -d "ok $(ts)" "$NTFY/$MON_T"
 while read -r k v; do case "$k" in S) SHED+=("$v");; N) NOTES+=("$v");; esac; done <"$SIDE"; rm -f "$SIDE"
 { echo "### AUREO external monitor $(ts)"; echo "result: ${key:-ALL PASS}"; echo "shed/gate: ${SHED[*]:-n/a}"; echo "${NOTES[*]:-}"; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
-[ -z "$key" ]
+[ -z "$key" ] && [ -z "${DELIVERY_FAILED:-}" ]
