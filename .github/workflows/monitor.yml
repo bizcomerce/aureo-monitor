@@ -3,7 +3,11 @@ on:
   workflow_dispatch:
     inputs:
       drill:
-        description: "empty | cart (bad cart path) | collector (wrong heartbeat topic)"
+        description: "empty | cart (bad cart path) | collector (wrong heartbeat topic) | b0 (any non-empty value: drill run, use with b0expect)"
+        required: false
+        default: ""
+      b0expect:
+        description: "manual override of the B0 expectation: present | absent (empty = repository variable B0_EXPECT, default present)"
         required: false
         default: ""
 concurrency:
@@ -26,4 +30,5 @@ jobs:
           DRILL_HB_PATH: ${{ github.event.inputs.drill == 'collector' && '/aureo-drill-nonexistent-hb.txt' || '' }}
           HB_PATH: ${{ secrets.HB_PATH }}
           DRILL_MON_BASE: ${{ github.event.inputs.drill != '' && 'drill' || '' }}
+          B0_EXPECT: ${{ github.event.inputs.b0expect || vars.B0_EXPECT || 'present' }}
         run: bash monitor.sh

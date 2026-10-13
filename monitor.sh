@@ -20,7 +20,7 @@ if [ -z "${DRILL_MON_BASE:-}" ] && [ "${FORCE_RUN:-}" != 1 ]; then
 fi
 ts() { date -u +%FT%TZ; }
 
-# fetch <path> -> sets F_CODE F_TTFB F_TOTAL F_LOC F_BYTES F_MARK F_WALL F_L3 F_GATE
+# fetch <path> -> sets F_CODE F_TTFB F_TOTAL F_LOC F_BYTES F_MARK F_CHAL F_WALL F_L3 F_GATE
 fetch() {
   local h b; h=$(mktemp); b=$(mktemp)
   local w; w=$(curl -sS -m 30 -A "$UA" -o "$b" -D "$h" -w '%{http_code} %{time_starttransfer} %{time_total}' "$BASE$1" 2>/dev/null) || w="000 0 30"
@@ -30,6 +30,7 @@ fetch() {
   F_L3=$(tr -d '\r' <"$h" | sed -n 's/^[Xx]-[Aa]ureo-[Ll]3: *//p' | head -1)
   F_GATE=$(tr -d '\r' <"$h" | sed -n 's/^[Xx]-[Aa]ureo-[Gg]ate: *//p' | head -1)
   F_BYTES=$(wc -c <"$b"); F_MARK=0; grep -qE 'aureo-page-cart|woocommerce-cart' "$b" && F_MARK=1
+  F_CHAL=0; [ "$F_BYTES" -lt 3000 ] && grep -q 'aureo_fv' "$b" && F_CHAL=1   # static Filter Shield 2A challenge page (~1 KB, sets aureo_fv)
   rm -f "$h" "$b"
 }
 over() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0>b+0)}'; }
@@ -46,9 +47,23 @@ c_chk()   { fetch "$1"; [ -n "$F_WALL" ] && { echo "wall_denied_transactional"; 
   over "$F_TTFB" 10 && { echo "checkout_slow"; return; }; }
 c_l3()    { fetch "$KEYLESS_PATH"; [ "$F_CODE" = 400 ] || { echo "l3_keyless_http_$F_CODE"; return; }
   [ -n "$F_L3" ] || { echo "l3_header_missing"; return; }; SHED+=("L3:$F_L3"); }
-c_b0()    { fetch "$CANARY_PATH"; [ "$F_CODE" = 503 ] && [ -n "$F_WALL" ] || { echo "b0_not_denying_$F_CODE"; return; }
+c_b0_present() { fetch "$CANARY_PATH"; [ "$F_CODE" = 503 ] && [ -n "$F_WALL" ] || { echo "b0_not_denying_$F_CODE"; return; }
   over "$F_TTFB" 2 && { echo "b0_slow"; return; }
   fetch /shop/; [ "$F_CODE" = 200 ] && [ -z "$F_WALL" ] || echo "shop_$F_CODE"; }
+# B0 removed (plan 21a9d291 G6): the cookieless filtered canary must reach the app. 200 with a real page, or the designed F cap
+# (429 shed-F / L3 header). Never deny-expensive, never a 503, never the 2A challenge page. A reappearing B0 is its own alert key.
+c_b0_absent() { fetch "$CANARY_PATH"
+  case "$F_WALL" in deny-expensive*) echo "b0_reappeared_deny_expensive"; return;; esac
+  [ "$F_CODE" = 503 ] && { echo "b0_reappeared_503${F_WALL:+_$F_WALL}"; return; }
+  [ "$F_CHAL" = 1 ] && { echo "filter_challenge_page_served"; return; }
+  case "$F_CODE" in
+    200) [ "$F_BYTES" -ge 2000 ] || { echo "filtered_200_small_${F_BYTES}B"; return; }; [ -z "$F_WALL" ] || { echo "filtered_200_wall_$F_WALL"; return; };;
+    429) case "$F_WALL" in shed-F*) ;; *) [ -n "$F_L3" ] || { echo "filtered_429_unrecognised"; return; };; esac; SHED+=("F429:${F_WALL:-$F_L3}");;
+    *) echo "filtered_http_$F_CODE"; return;;
+  esac
+  over "$F_TTFB" 10 && { echo "filtered_slow"; return; }
+  fetch /shop/; [ "$F_CODE" = 200 ] && [ -z "$F_WALL" ] && [ "$F_CHAL" = 0 ] || echo "shop_$F_CODE"; }
+c_b0()    { if [ "${B0_EXPECT:-present}" = absent ]; then c_b0_absent; else c_b0_present; fi; }
 c_tls()   { local host=${BASE#https://} end d
   end=$(echo | timeout 15 openssl s_client -servername "$host" -connect "$host:443" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
   [ -n "$end" ] || { echo "tls_unreadable"; return; }
@@ -59,6 +74,7 @@ c_dead()  { # pull-based collector heartbeat: public file holding one epoch, rew
   ep=$(printf '%s' "$body" | tr -d ' \r\n'); case "$ep" in ''|*[!0-9]*) echo "collector_heartbeat_unreadable"; return;; esac
   age=$(( $(date +%s) - ep )); NOTES+=("collector_hb_age_s=$age"); [ "$age" -le 2400 ] || echo "collector_heartbeat_stale_${age}s"; }
 
+[ "${MONITOR_LIB:-}" = 1 ] && return 0 2>/dev/null   # test hook: load the check functions only
 run() { # name fn arg  (one retry after 20 s so a single dropped request never pages)
   local r; r=$("$2" "${3:-}"); if [ -n "$r" ]; then sleep 20; r=$("$2" "${3:-}"); fi
   if [ -n "$r" ]; then FAILS+=("$1:$r"); echo "FAIL $1 $r"; else echo "pass $1"; fi; }
