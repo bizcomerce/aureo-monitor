@@ -3,7 +3,11 @@ on:
   workflow_dispatch:
     inputs:
       drill:
-        description: "empty | cart (bad cart path) | collector (wrong heartbeat topic) | b0 (any non-empty value: drill run, use with b0expect)"
+        description: "empty | cart (bad cart path) | collector (wrong heartbeat topic) | b0 (any non-empty value: drill run, use with b0expect) | g5a (receipt drill: two labelled messages, no checks; needs nonce)"
+        required: false
+        default: ""
+      nonce:
+        description: "g5a drill only: nonce quoted in the drill messages ([A-Za-z0-9-])"
         required: false
         default: ""
       b0expect:
@@ -31,4 +35,6 @@ jobs:
           HB_PATH: ${{ secrets.HB_PATH }}
           DRILL_MON_BASE: ${{ github.event.inputs.drill != '' && 'drill' || '' }}
           B0_EXPECT: ${{ github.event.inputs.b0expect || vars.B0_EXPECT || 'present' }}
+          G5A_DRILL: ${{ github.event.inputs.drill == 'g5a' && '1' || '' }}
+          G5A_NONCE: ${{ github.event.inputs.nonce }}
         run: bash monitor.sh

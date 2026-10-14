@@ -76,6 +76,24 @@ c_dead()  { # pull-based collector heartbeat: public file holding one epoch, rew
   age=$(( $(date +%s) - ep )); note N "collector_hb_age_s=$age"; [ "$age" -le 2400 ] || echo "collector_heartbeat_stale_${age}s"; }
 
 [ "${MONITOR_LIB:-}" = 1 ] && return 0 2>/dev/null   # test hook: load the check functions only
+pub() { local c i; for i in 1 2 3; do   # verify the HTTP status: a 429/5xx must never look like a delivered alert
+    c=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -H "Title: AUREO $1" -H "Priority: $2" -d "$3" "$NTFY/$ALERT_T" 2>/dev/null) || c=000
+    [ "$c" = 200 ] && { echo "ntfy alert delivery http 200"; return 0; }; echo "ntfy alert delivery http $c (try $i)"; sleep 5; done
+  echo "ALERT DELIVERY FAILED"; DELIVERY_FAILED=1; return 1; }
+# G5a receipt drill (drill=g5a): one ALERT-drill and one RECOVERED-drill message through the real pub(), priority default (the
+# lowest that still sounds/vibrates). No checks and no -mon liveness. The bodies start with "AUREO G5a DRILL", never with ALERT or
+# RECOVERED, so the alert state machine below (and the next scheduled run) ignores them. Prints the stored ntfy message ids.
+if [ "${G5A_DRILL:-}" = 1 ]; then
+  n=${G5A_NONCE:-}; case "$n" in ''|*[!A-Za-z0-9-]*) echo "g5a: nonce missing or invalid"; exit 1;; esac
+  q=$(curl -sS -m 10 "$NTFY/v1/account" 2>/dev/null | jq -c '{basis:.limits.basis,limit:.limits.messages,used:.stats.messages,remaining:.stats.messages_remaining}' 2>/dev/null)
+  echo "g5a runner ntfy quota before: ${q:-unreadable}"
+  pub "G5a DRILL ALERT (test)" default "AUREO G5a DRILL $(ts) $n — test, no action needed (ALERT path)" || exit 1
+  sleep "${G5A_GAP:-20}"
+  pub "G5a DRILL RECOVERED (test)" default "AUREO G5a DRILL $(ts) $n — test, no action needed (RECOVERED path)" || exit 1
+  sleep "${G5A_SETTLE:-3}"; curl -sS -m 15 "$NTFY/$ALERT_T/json?poll=1&since=10m" 2>/dev/null | jq -r --arg n "$n" \
+    'select(.event=="message" and (.message|contains($n))) | "g5a stored id=\(.id) time=\(.time) priority=\(.priority // 3) title=\(.title)"'
+  exit 0
+fi
 run() { # name fn arg  (one retry after 20 s so a single dropped request never pages)
   local r; r=$("$2" "${3:-}"); if [ -n "$r" ]; then sleep 20; r=$("$2" "${3:-}"); fi
   if [ -n "$r" ]; then FAILS+=("$1:$r"); echo "FAIL $1 $r"; else echo "pass $1"; fi; }
@@ -86,10 +104,6 @@ run p06-l3 c_l3; run b0 c_b0; run tls c_tls; run collector-dead-man c_dead
 
 key=$(printf '%s\n' "${FAILS[@]:-}" | sed 's/:.*//' | sort | tr '\n' ',' ); key=${key%,}
 last=$(poll "$ALERT_T" 6h | grep -E "^[0-9]+ (ALERT|RECOVERED)" | tail -1); lt=${last%% *}; lm=${last#* }; now=$(date +%s)
-pub() { local c i; for i in 1 2 3; do   # verify the HTTP status: a 429/5xx must never look like a delivered alert
-    c=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -H "Title: AUREO $1" -H "Priority: $2" -d "$3" "$NTFY/$ALERT_T" 2>/dev/null) || c=000
-    [ "$c" = 200 ] && { echo "ntfy alert delivery http 200"; return 0; }; echo "ntfy alert delivery http $c (try $i)"; sleep 5; done
-  echo "ALERT DELIVERY FAILED"; DELIVERY_FAILED=1; return 1; }
 if [ -n "$key" ]; then
   detail=$(printf '%s; ' "${FAILS[@]}")
   if [ "${lm%% *}" = ALERT ] && [ "${lm#ALERT }" != "$lm" ] && [ "$(echo "$lm" | sed -n 's/^ALERT \([^ ]*\) .*/\1/p')" = "$key" ] && [ $((now-${lt:-0})) -lt 3600 ]; then

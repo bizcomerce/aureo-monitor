@@ -40,4 +40,20 @@ sc '200|||page|0.1'; export SHOP_CODE=503; t absent-shop-down "shop_503" c_b0; e
 unset B0_EXPECT; sc '503|deny-expensive||deny'; t default-is-present "" c_b0
 # shed/notes survive the $(...) subshell of run()
 SIDE=$(mktemp); B0_EXPECT=absent; sc "429|shed-F||deny"; r=$(c_b0); t side-shed "S F429:shed-F" grep -x "S F429:shed-F" "$SIDE"; rm -f "$SIDE"
+# G5a receipt drill: whole script, own stub curl (logs every call) and stub jq; no checks, exactly two publishes, no -mon
+G=$(mktemp -d); LOG="$G/calls"; export LOG
+cat >"$G/curl" <<'STUB'
+#!/usr/bin/env bash
+w=; U=; d=; p=; while [ $# -gt 0 ]; do case "$1" in -w) w=$2; shift;; -d) d=$2; shift;; -H) case "$2" in Priority:*) p=${2#Priority: };; esac; shift;; -o|-m|-A) shift;; -*) ;; *) U=$1;; esac; shift; done
+printf '%s|%s|%s\n' "$U" "$p" "$d" >>"$LOG"; [ -n "$w" ] && printf 200; exit 0
+STUB
+printf '#!/usr/bin/env bash\ncat >/dev/null\n' >"$G/jq"; chmod +x "$G/curl" "$G/jq"
+g5a() { : >"$LOG"; ( unset MONITOR_LIB; PATH="$G:$PATH" NTFY_BASE=x HB_PATH=/hb DRILL_MON_BASE=drill G5A_DRILL=1 G5A_NONCE=$1 G5A_GAP=0 G5A_SETTLE=0 bash "$M" >/dev/null 2>&1 ); echo $?; }
+t g5a-exit-0 0 g5a N0nce-1
+t g5a-two-publishes 2 grep -c '^https://ntfy.sh/x-alert|default|AUREO G5a DRILL .* N0nce-1 — test, no action needed (' "$LOG"
+t g5a-no-alert-or-recovered-prefix 0 grep -c -E '\|(ALERT|RECOVERED) ' "$LOG"
+t g5a-no-mon-no-checks 0 grep -c -E 'x-mon|aureo-collection' "$LOG"
+t g5a-bad-nonce-exit-1 1 g5a 'bad nonce;'
+t g5a-bad-nonce-no-publish 0 grep -c . "$LOG"
+rm -rf "$G"
 echo "pass $P fail $F"; [ "$F" = 0 ]
