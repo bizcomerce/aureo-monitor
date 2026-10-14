@@ -95,7 +95,8 @@ cat >"$W/curl" <<'STUB'
 o=/dev/null; D=/dev/null; w=; d=; U=; ti=; pr=
 while [ $# -gt 0 ]; do case "$1" in -o) o=$2; shift;; -D) D=$2; shift;; -w) w=$2; shift;; -d) d=$2; shift;;
   -H) case "$2" in Title:*) ti=${2#Title: };; Priority:*) pr=${2#Priority: };; esac; shift;; -m|-A) shift;; -*) ;; *) U=$1;; esac; shift; done
-case "$U" in https://ntfy.sh/*) [ -n "$d" ] && { printf '%s|%s|%s|%s\n' "${U#https://ntfy.sh/}" "$ti" "$pr" "$d" >>"$PUBLOG"; [ -n "$w" ] && printf 200; }; exit 0;;
+case "$U" in https://ntfy.sh/*) [ -n "$d" ] && { printf '%s|%s|%s|%s\n' "${U#https://ntfy.sh/}" "$ti" "$pr" "$d" >>"$PUBLOG"; [ -n "$w" ] && printf 200; }
+    case "$U" in *-alert/json\?poll=1*) [ -n "${PREV:-}" ] && printf '%s\n' "$PREV";; esac; exit 0;;   # PREV = last "<epoch> <message>"
   https://api.ipify.org*) printf '203.0.113.7'; exit 0;; esac
 p=${U#https://aureo-collection.com}; q=${p%%\?*}
 code=200 srv=LiteSpeed kind=shop loc= l3=
@@ -118,8 +119,8 @@ cat >"$W/openssl" <<'STUB'
 #!/usr/bin/env bash
 cat >/dev/null; case "$1" in s_client) echo "    Verify return code: ${TLSV:-0} (ok)";; x509) echo "notAfter=Dec 31 00:00:00 2030 GMT";; esac
 STUB
-printf '#!/usr/bin/env bash\ncat >/dev/null\n' >"$W/jq"; chmod +x "$W/curl" "$W/openssl" "$W/jq"
-wr() { : >"$PUBLOG"; ( unset MONITOR_LIB B0_EXPECT LOC SHOP_CODE SHOP_SERVER SCEN; PATH="$W:$PATH" MODE=$1 TLSV=${2:-0} NTFY_BASE=x DRILL_MON_BASE=t RETRY_GAP=0 \
+printf '#!/usr/bin/env bash\ncat\n' >"$W/jq"; chmod +x "$W/curl" "$W/openssl" "$W/jq"   # stub poll output is already "<epoch> <message>"
+wr() { : >"$PUBLOG"; ( unset MONITOR_LIB B0_EXPECT LOC SHOP_CODE SHOP_SERVER SCEN; PATH="$W:$PATH" MODE=$1 TLSV=${2:-0} PREV="${PREV:-}" NTFY_BASE=x DRILL_MON_BASE=t RETRY_GAP=0 \
   B0_EXPECT=absent KEYLESS_PATH=/kl-secret CANARY_PATH='/shop/?filter_color=black' HB_PATH=/hb-secret.txt bash "$M" >"$W/out" 2>&1 ); echo $?; }
 pubs() { grep -c . "$PUBLOG"; }; pubf() { cut -d'|' -f"$1" "$PUBLOG" | head -1; }
 t run-normal-exit-0 0 wr normal;            t run-normal-no-publish 0 pubs;  t run-normal-no-diag 0 grep -c '^diag ' "$W/out"
@@ -140,6 +141,25 @@ t run-transport-confirmed "AUREO SALES/WALL ALERT|urgent" eval 'wr transport >/d
 t run-mixed-confirmed-wins "AUREO SALES/WALL ALERT|urgent" eval 'wr mixed >/dev/null; cut -d"|" -f2,3 "$PUBLOG"'
 t run-mixed-detail 1 grep -c 'cart-en:cart_http_500\[confirmed\]; cart-it:cart_marker_missing\[blocked\];' "$PUBLOG"
 t run-tls-verify-fail "ALERT confirmed:tls tls:tls_verify_failed_62[confirmed];" eval 'wr normal 62 >/dev/null; pubf 4 | cut -d" " -f1-3'
+# Alert state machine (unchanged code path): recovery after every verdict class, no repeat of an unchanged alert, escalation
+now() { date +%s; }
+seq_prev() { PREV="$(now) $(cut -d'|' -f4 "$PUBLOG" | head -1)"; export PREV; }   # last published message becomes the topic state
+unset PREV; wr hbstale >/dev/null; seq_prev
+t seq-collector-outage-then-recovered "AUREO RECOVERED|default|RECOVERED all checks pass" eval 'wr normal >/dev/null; cut -d"|" -f2-4 "$PUBLOG" | cut -d" " -f1-5'
+unset PREV; wr challenge >/dev/null; seq_prev
+t seq-blocked-unchanged-not-repeated 0 eval 'wr challenge >/dev/null; pubs'
+t seq-blocked-unchanged-logged 1 grep -c '^alert unchanged, not repeated' "$W/out"
+t seq-blocked-escalates-to-confirmed "AUREO SALES/WALL ALERT|urgent" eval 'wr mixed >/dev/null; cut -d"|" -f2,3 "$PUBLOG"'
+t seq-blocked-then-recovered "AUREO RECOVERED|default" eval 'wr normal >/dev/null; cut -d"|" -f2,3 "$PUBLOG"'
+unset PREV; wr ambiguous >/dev/null; seq_prev
+t seq-ambiguous-then-recovered "AUREO RECOVERED|default" eval 'wr normal >/dev/null; cut -d"|" -f2,3 "$PUBLOG"'
+PREV="$(now) ALERT cart-en,cart-it cart-en:cart_marker_missing; cart-it:cart_marker_missing; 2026-10-14T08:32:42Z"; export PREV
+t seq-legacy-alert-then-recovered "AUREO RECOVERED|default" eval 'wr normal >/dev/null; cut -d"|" -f2,3 "$PUBLOG"'
+PREV="$(now) RECOVERED all checks pass 2026-10-14T08:45:50Z"; export PREV
+t seq-already-recovered-silent 0 eval 'wr normal >/dev/null; pubs'
+PREV="$(( $(now) - 4000 )) ALERT blocked:b0,cart-en,cart-it,checkout-en,checkout-it,collector-dead-man,p06-l3 x"; export PREV
+t seq-unchanged-alert-repeats-after-60min 1 eval 'wr challenge >/dev/null; pubs'
+unset PREV
 wrd() { : >"$PUBLOG"; ( unset MONITOR_LIB B0_EXPECT LOC SHOP_CODE SHOP_SERVER SCEN; PATH="$W:$PATH" MODE=$1 MONITOR_DRY=1 NTFY_BASE=x DRILL_MON_BASE=drill RETRY_GAP=0 \
   B0_EXPECT=absent KEYLESS_PATH=/kl-secret CANARY_PATH='/shop/?filter_color=black' HB_PATH=/hb-secret.txt bash "$M" >"$W/out" 2>&1 ); echo $?; }
 t dry-challenge-exit-0 0 wrd challenge;     t dry-challenge-no-publish 0 pubs
