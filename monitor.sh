@@ -27,11 +27,14 @@ ts() { date -u +%FT%TZ; }
 # hoster's openresty front; the Imunify WebShield challenge (2026-10-09, run #154) is answered by openresty itself (~12 KB, 200).
 # F_CLASS: origin | challenge (openresty 200/403/429, no origin evidence) | proxy_5xx (openresty 5xx = backend unreachable) |
 #          transport (no HTTP response) | unknown (anything else: neither provably the shop nor a recognised challenge)
-LASTF=$(mktemp)
+#   $LASTX gets a second, safe diagnostic line for a challenge/unknown response only (see xdiag below): connection facts, header NAMES,
+#   Content-Type/Date, cookie NAMES, a sanitised <title> and a few boolean body markers. Never a header value beyond those, never a body.
+LASTF=$(mktemp); LASTX=$(mktemp)
+san() { tr -cd 'A-Za-z0-9._,/+:=-' | cut -c1-"${1:-60}"; }   # allow-list filter for anything the remote side controls
 fetch() {
   local h b nc=(); h=$(mktemp); b=$(mktemp); [ "${2:-}" = nocache ] && nc=(-H 'Cache-Control: no-cache' -H 'Pragma: no-cache')
-  local w; w=$(curl -sS -m 30 -A "$UA" "${nc[@]}" -o "$b" -D "$h" -w '%{http_code} %{time_starttransfer} %{time_total}' "$BASE$1" 2>/dev/null) || w="000 0 30"
-  read -r F_CODE F_TTFB F_TOTAL <<<"$w"
+  local w; w=$(curl -sS -m 30 -A "$UA" "${nc[@]}" -o "$b" -D "$h" -w '%{http_code} %{time_starttransfer} %{time_total} %{remote_ip} %{http_version} %{time_connect} %{time_appconnect}' "$BASE$1" 2>/dev/null) || w="000 0 30 - - 0 0"
+  read -r F_CODE F_TTFB F_TOTAL F_RIP F_HV F_TCONN F_TTLS <<<"$w"
   F_LOC=$(tr -d '\r' <"$h" | sed -n 's/^[Ll]ocation: *//p' | head -1)
   F_WALL=$(tr -d '\r' <"$h" | sed -n 's/^[Xx]-[Aa]ureo-[Ww]all: *//p' | head -1)
   F_L3=$(tr -d '\r' <"$h" | sed -n 's/^[Xx]-[Aa]ureo-[Ll]3: *//p' | head -1)
@@ -50,8 +53,25 @@ fetch() {
   local lc=none; case "$F_LOC" in '') ;; */cart/|*/cart-it/|*/cart/\?*|*/cart-it/\?*) lc=cart;; "$BASE"*|/*) lc=same-host;; *) lc=external;; esac
   printf 'http=%s server=%s origin=%s class=%s loc=%s bytes=%s sha8=%s ttfb=%s\n' "$F_CODE" "${F_SERVER:-none}" "$F_ORIGIN" "$F_CLASS" \
     "$lc" "$F_BYTES" "$(sha256sum "$b" | cut -c1-8)" "$F_TTFB" >"$LASTF"
+  case "$F_CLASS" in challenge|unknown)   # extra evidence for the next incident, only when the response is not provably the shop
+    local hb fl=; hb=$(head -c 6000 "$b" | tr -c 'A-Za-z0-9_.<>/=-' ' ')
+    for w in imunify360 captcha aureo_fv reload '<script'; do printf '%s' "$hb" | grep -qiF -- "$w" && fl+="${w#<},"; done
+    printf 'rip=%s hv=%s tconn=%s ttls=%s ctype=%s date=%s hdrs=%s cookies=%s title=%s flags=%s\n' \
+      "$(printf %s "${F_RIP:--}" | san 45)" "$(printf %s "${F_HV:--}" | san 6)" "${F_TCONN:-0}" "${F_TTLS:-0}" \
+      "$(tr -d '\r' <"$h" | sed -n 's/^[Cc]ontent-[Tt]ype: *//p' | head -1 | tr ' ' '_' | san 40)" \
+      "$(tr -d '\r' <"$h" | sed -n 's/^[Dd]ate: *//p' | head -1 | tr ' ' '_' | san 40)" \
+      "$(tr -d '\r' <"$h" | sed -n 's/^\([A-Za-z0-9-]\{1,40\}\):.*/\1/p' | tr 'A-Z' 'a-z' | sort -u | paste -sd, - | san 300)" \
+      "$(tr -d '\r' <"$h" | sed -n 's/^[Ss]et-[Cc]ookie: *\([A-Za-z0-9_.-]\{1,40\}\)=.*/\1/p' | sort -u | paste -sd, - | san 120)" \
+      "$(grep -io '<title>[^<]*' "$b" | head -1 | cut -c8-70 | tr ' ' '_' | san 60)" "${fl%,}" >"$LASTX";; esac
   rm -f "$h" "$b"
 }
+# control: two GETs of a public static file, with the monitor UA and with a browser-shaped UA. Run only when a run is inconclusive;
+# tells a per-UA rule from a per-IP block (same response for both = the runner IP, not the UA).
+control() { local who ua
+  for who in monitor-ua browser-ua; do
+    case $who in monitor-ua) ua=$UA;; *) ua="Mozilla/5.0 (X11; Linux x86_64) AUREO-Synthetic-control/1.0";; esac
+    ( UA=$ua; fetch /robots.txt; printf 'control robots.txt %s http=%s server=%s origin=%s class=%s bytes=%s ttfb=%s\n' "$who" "$F_CODE" "${F_SERVER:-none}" "$F_ORIGIN" "$F_CLASS" "$F_BYTES" "$F_TTFB" )
+  done; }
 over() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0>b+0)}'; }
 
 # each check echoes "" on pass or a short reason on fail
@@ -127,47 +147,81 @@ fi
 # Each final failure gets a verdict from the class of the response that failed it (the last fetch of the failing attempt):
 #   challenge -> blocked (hosting challenge layer answered, the shop was never asked); unknown -> ambiguous;
 #   origin / proxy_5xx / transport / tls / no fingerprint -> confirmed (fail safe: a genuine failure is never downgraded).
-VERDS=(); DIAG=()
+VERDS=(); DIAG=(); XDIAG=(); CONTROL=()
 run() { # name fn arg  (one retry after RETRY_GAP, default 20 s, so a single dropped request never pages)
-  local r v c; : >"$LASTF"; r=$("$2" "${3:-}"); if [ -n "$r" ]; then sleep "${RETRY_GAP:-20}"; : >"$LASTF"; r=$("$2" "${3:-}"); fi
+  local r v c x; : >"$LASTF"; : >"$LASTX"; r=$("$2" "${3:-}"); if [ -n "$r" ]; then sleep "${RETRY_GAP:-20}"; : >"$LASTF"; : >"$LASTX"; r=$("$2" "${3:-}"); fi
   if [ -z "$r" ]; then echo "pass $1"; return; fi
   c=$(sed -n 's/.*class=\([a-z_0-9]*\).*/\1/p' "$LASTF" | head -1)
   case "$c" in challenge) v=blocked;; unknown) v=ambiguous;; *) v=confirmed;; esac
-  FAILS+=("$1:$r"); VERDS+=("$v"); DIAG+=("$1 $r verdict=$v $(head -1 "$LASTF")"); echo "FAIL $1 $r"; echo "diag ${DIAG[${#DIAG[@]}-1]}"; }
+  FAILS+=("$1:$r"); VERDS+=("$v"); DIAG+=("$1 $r verdict=$v $(head -1 "$LASTF")"); echo "FAIL $1 $r"; echo "diag ${DIAG[${#DIAG[@]}-1]}"
+  x=$(head -1 "$LASTX"); [ -n "$x" ] && { XDIAG+=("$1 $x"); echo "xdiag $1 $x"; }; return 0; }
 
 run cart-en c_cart "$CART_EN"; run cart-it c_cart "$CART_IT"
 run checkout-en c_chk "$CHK_EN"; run checkout-it c_chk "$CHK_IT"
 run p06-l3 c_l3; run b0 c_b0; run tls c_tls; run collector-dead-man c_dead
-rm -f "$LASTF"
 
-# run verdict: any confirmed failure is a SALES/WALL ALERT (urgent, unchanged); otherwise the store status is UNVERIFIED and the
-# owner is told so at once: ambiguous -> MONITOR FAILURE (urgent), only recognised challenges -> MONITOR ACCESS BLOCKED (high)
+# Run verdict (per failing check, from the class of the response that failed it):
+#   confirmed (shop/origin answered wrongly, 5xx, transport, TLS, ...) -> SALES/WALL ALERT: urgent push + failed run (mail). Unchanged.
+#   ambiguous (neither the shop nor a recognised challenge)            -> MONITOR FAILURE, urgent push + failed run. Unchanged.
+#   blocked   (only recognised hosting-challenge responses)            -> INCONCLUSIVE: the check could not be made, the shop was not
+#     reached. Not a shop failure and NOT a pass: warning annotation, "UNVERIFIED" result in the summary, a silent (min priority) ntfy
+#     marker so repeats group into one episode, the run itself succeeds (no "Run failed" mail). After ESC_AFTER s (default 40 min) of
+#     an unbroken episode ONE high-priority push says the shop has been unverified for that long (repeated every ESC_REPEAT s, 3 h).
 verdict=; case " ${VERDS[*]:-} " in *" confirmed "*) verdict=confirmed;; *" ambiguous "*) verdict=ambiguous;; *" blocked "*) verdict=blocked;; esac
 names=$(printf '%s\n' "${FAILS[@]:-}" | sed 's/:.*//' | sort | tr '\n' ',' ); names=${names%,}
 key=; [ -n "$names" ] && key="$verdict:$names"
 RIP=; if [ -n "$key" ]; then   # runner public IP, only for a failing run (lets a hosting block be put to the hoster with IP + time)
   RIP=$(curl -sS -m 8 https://api.ipify.org 2>/dev/null | head -c 64 | tr -cd '0-9a-fA-F:.')
   case "$RIP" in *.*.*.*|*:*:*) ;; *) RIP=unavailable;; esac; echo "runner_ip=$RIP"; fi
-last=$(poll "$ALERT_T" 6h | grep -E "^[0-9]+ (ALERT|RECOVERED)" | tail -1); lt=${last%% *}; lm=${last#* }; now=$(date +%s)
-if [ -n "$key" ]; then
+case "$verdict" in blocked|ambiguous)   # two extra GETs of /robots.txt, only when the run could not reach the shop (never during a confirmed failure)
+  while IFS= read -r l; do CONTROL+=("$l"); echo "$l"; done < <(control);; esac
+rm -f "$LASTF" "$LASTX"
+polled=$(poll "$ALERT_T" 6h); now=$(date +%s)
+last=$(printf '%s\n' "$polled" | grep -E "^[0-9]+ (ALERT|RECOVERED)" | tail -1); lt=${last%% *}; lm=${last#* }
+# current inconclusive episode: a chain of INCONCLUSIVE/UNVERIFIED markers, each within EP_GAP s (default 40 min) of the previous one and
+# of now, not broken by ALERT/RECOVERED/CLEARED. -> start epoch, epoch of the last UNVERIFIED push, epoch of the last marker (0 = none)
+read -r EP_START EP_UNV EP_LAST < <(printf '%s\n' "$polled" | awk -v now="$now" -v gap="${EP_GAP:-2400}" '
+  $1 ~ /^[0-9]+$/ && $2 ~ /^(ALERT|RECOVERED|INCONCLUSIVE|UNVERIFIED|CLEARED)$/ {
+    if ($2 == "INCONCLUSIVE" || $2 == "UNVERIFIED") { if (start == "" || $1 - lastt > gap) { start = $1; unv = "" }; lastt = $1; if ($2 == "UNVERIFIED") unv = $1 }
+    else { start = ""; unv = ""; lastt = "" } }
+  END { if (start != "" && now - lastt <= gap) print start, unv + 0, lastt; else print "0 0 0" }')
+: "${EP_START:=0}" "${EP_UNV:=0}" "${EP_LAST:=0}"
+HARD_PUBLISHED=0; RESULT=${key:-ALL PASS}
+if [ -n "$key" ] && [ "$verdict" = blocked ]; then
+  elapsed=0; [ "$EP_START" -gt 0 ] && elapsed=$((now-EP_START))
+  RESULT="INCONCLUSIVE - STORE STATUS UNVERIFIED (not a shop failure, not a pass): $key"
+  echo "::warning title=AUREO monitor INCONCLUSIVE::The hosting challenge layer answered the monitor; the shop was not reached and its status is UNVERIFIED by this run ($key). Not a shop failure."
+  if [ "$EP_START" -gt 0 ] && [ "$elapsed" -ge "${ESC_AFTER:-2400}" ] && { [ "$EP_UNV" -eq 0 ] || [ $((now-EP_UNV)) -ge "${ESC_REPEAT:-10800}" ]; }; then
+    pub "MONITOR ACCESS BLOCKED - STORE STATUS UNVERIFIED" high "UNVERIFIED $key the monitor has been unable to reach the shop for $((elapsed/60)) min (hosting challenge layer answers it; not a shop failure, not a pass). runner_ip=$RIP $(ts)"
+    echo "inconclusive episode escalated after $((elapsed/60)) min: $key"
+  else
+    pub "monitor inconclusive" min "INCONCLUSIVE $key runner_ip=$RIP $(ts)" || DELIVERY_FAILED=   # a lost silent marker must not fail the run
+    echo "inconclusive recorded (episode $([ "$EP_START" -gt 0 ] && echo "$((elapsed/60)) min old" || echo "new"), silent, no failed-run mail)"
+  fi
+elif [ -n "$key" ]; then
   detail=; for i in "${!FAILS[@]}"; do detail+="${FAILS[$i]}[${VERDS[$i]}]; "; done
   case "$verdict" in
     confirmed) title="SALES/WALL ALERT"; prio=urgent; msg="ALERT $key $detail$(ts)";;
     ambiguous) title="MONITOR FAILURE - STORE STATUS UNVERIFIED"; prio=urgent
                msg="ALERT $key STORE STATUS UNVERIFIED: the monitor got responses that are neither the shop nor a recognised hosting challenge. $detail runner_ip=$RIP $(ts)";;
-    *)         title="MONITOR ACCESS BLOCKED - STORE STATUS UNVERIFIED"; prio=high
-               msg="ALERT $key STORE STATUS UNVERIFIED: the hosting challenge layer answered the monitor, the shop was not reached (not a shop failure). $detail runner_ip=$RIP $(ts)";;
+    *)         title="MONITOR FAILURE - STORE STATUS UNVERIFIED"; prio=urgent; msg="ALERT $key $detail$(ts)";;   # not reachable: blocked is handled above
   esac
   if [ "${lm%% *}" = ALERT ] && [ "${lm#ALERT }" != "$lm" ] && [ "$(echo "$lm" | sed -n 's/^ALERT \([^ ]*\) .*/\1/p')" = "$key" ] && [ $((now-${lt:-0})) -lt 3600 ]; then
+    # same incident already announced within the hour: no new push and no failed run (no mail every 15 min); the run says it is ongoing
+    RESULT="ONGOING (alert sent $((now-lt)) s ago): $key"
     echo "alert unchanged, not repeated (last $((now-lt)) s ago)"
-  else pub "$title" "$prio" "$msg"; echo "alert published: $key"; fi
+    echo "::error title=AUREO monitor ONGOING incident::$key - alert already sent $(( (now-lt)/60 )) min ago; this run did not repeat it."
+  else pub "$title" "$prio" "$msg"; echo "alert published: $key"; HARD_PUBLISHED=1; fi
 else
-  if [ "${lm%% *}" = ALERT ]; then pub "RECOVERED" default "RECOVERED all checks pass $(ts)"; echo "recovery published"; fi
+  if [ "${lm%% *}" = ALERT ]; then pub "RECOVERED" default "RECOVERED all checks pass $(ts)"; echo "recovery published"
+  elif [ "$EP_START" -gt 0 ]; then pub "monitor check restored" min "CLEARED all checks pass $(ts)" || DELIVERY_FAILED=; echo "inconclusive episode cleared (silent)"; fi
 fi
 # monitor liveness for the on-host dead-man (published only when the run completed)
 [ -z "${DRILL_MON_BASE:-}" ] && curl -sS -m 10 -o /dev/null -d "ok $(ts)" "$NTFY/$MON_T"
 while read -r k v; do case "$k" in S) SHED+=("$v");; N) NOTES+=("$v");; esac; done <"$SIDE"; rm -f "$SIDE"
-{ echo "### AUREO external monitor $(ts)"; echo "result: ${key:-ALL PASS}"; echo "shed/gate: ${SHED[*]:-n/a}"; echo "${NOTES[*]:-}"
-  [ -n "$key" ] && { echo "runner_ip: $RIP"; printf -- '- %s\n' "${DIAG[@]}"; }; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
-[ "${MONITOR_DRY:-}" = 1 ] && { echo "dry run result: ${key:-ALL PASS} (exit 0: no publish, no failed-run mail)"; exit 0; }
-[ -z "$key" ] && [ -z "${DELIVERY_FAILED:-}" ]
+{ echo "### AUREO external monitor $(ts)"; echo "result: $RESULT"; echo "shed/gate: ${SHED[*]:-n/a}"; echo "${NOTES[*]:-}"
+  [ -n "$key" ] && { echo "runner_ip: $RIP"; printf -- '- %s\n' "${DIAG[@]}"; [ ${#XDIAG[@]} -gt 0 ] && printf -- '- xdiag %s\n' "${XDIAG[@]}"
+    [ ${#CONTROL[@]} -gt 0 ] && printf -- '- %s\n' "${CONTROL[@]}"; }; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+[ "${MONITOR_DRY:-}" = 1 ] && { echo "dry run result: $RESULT (exit 0: no publish, no failed-run mail)"; exit 0; }
+# The run fails (GitHub "Run failed" mail) only when a NEW confirmed/ambiguous alert was pushed this run, or an alert could not be delivered.
+[ "$HARD_PUBLISHED" = 0 ] && [ -z "${DELIVERY_FAILED:-}" ]
