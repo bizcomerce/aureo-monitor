@@ -15,6 +15,7 @@ case "$U" in */shop/) code=${SHOP_CODE:-200}; wall=; l3=; kind=page; server=${SH
 case "$kind" in chal) printf '<script>document.cookie="aureo_fv=1";location.reload()</script>%0900s' x >"$o";;
   page) { echo '<html>'; head -c 2500 /dev/zero | tr '\0' a; echo '</html>'; } >"$o";; deny) echo '<h1>503</h1>' >"$o";;
   wsc) { echo '<html><head><title>One moment</title></head><body><script>setTimeout(function(){location.reload()},1500)</script>'; head -c 11800 /dev/zero | tr '\0' b; echo '</body></html>'; } >"$o";;
+  cfwsc) { echo '<html><head><title>One moment, please...</title></head><body><script src="/cdn-cgi/challenge-platform/a.js"></script>'; head -c 11800 /dev/zero | tr '\0' c; echo '</body></html>'; } >"$o";;
   wp) { echo '<html><link href="/wp-content/themes/x.css">'; head -c 2500 /dev/zero | tr '\0' a; echo '</html>'; } >"$o";;
   *) : >"$o";; esac
 printf '%s %s 0.2' "$code" "${ttfb:-0.1}"
@@ -53,6 +54,10 @@ sc '200|||wp|0.1|-';               t class-origin-body-marker origin fp /cart/ c
 sc '200|||wsc|0.1|openresty';      t class-challenge-200 challenge fp /cart/ class
 sc '403|||deny|0.1|openresty';     t class-challenge-403 challenge fp /cart/ class
 sc '502|||deny|0.1|openresty';     t class-proxy-5xx proxy_5xx fp /cart/ class
+sc '200|||cfwsc|0.1|cloudflare';    t class-cf-challenge-200 challenge fp /cart/ class
+sc '403|||deny|0.1|cloudflare';     t class-cf-challenge-403 challenge fp /cart/ class
+sc '502|||deny|0.1|cloudflare';     t class-cf-proxy-5xx proxy_5xx fp /cart/ class
+sc '200|||page|0.1|cloudflare';     t class-cf-generic-200-unknown unknown fp /cart/ class
 sc '000';                          t class-transport transport fp /cart/ class
 sc '200|||page|0.1|nginx';         t class-unknown unknown fp /cart/ class
 sc '200||r6|wsc|0.1|openresty';    t class-aureo-header-is-origin origin fp /cart/ class
@@ -103,7 +108,7 @@ code=200 srv=LiteSpeed kind=shop loc= l3=
 case "$q" in /cart/|/it/cart-it/) kind=cart;; /checkout/) code=302 kind=empty loc=https://aureo-collection.com/cart/;;
   /it/checkout-it/) code=302 kind=empty loc=https://aureo-collection.com/it/cart-it/;; /kl-secret) code=400 kind=empty l3=r6;;
   /hb-secret.txt) kind=hb;; esac
-case "$MODE" in challenge) code=200 srv=openresty kind=wsc loc= l3=;; ambiguous) code=200 srv=nginx kind=park loc= l3=;;
+case "$MODE" in challenge) code=200 srv=openresty kind=wsc loc= l3=;; cfchallenge) code=200 srv=cloudflare kind=cfwsc loc= l3=;; ambiguous) code=200 srv=nginx kind=park loc= l3=;;
   proxy502) code=502 srv=openresty kind=empty loc= l3=;; transport) exit 7;;
   cartdown) [ "$q" = /cart/ ] && { code=500; kind=empty; };; hbstale) [ "$kind" = hb ] && kind=hbold;;
   uablock) case "$ua" in *AUREO-Synthetic/1.0*) code=200 srv=openresty kind=wsc loc= l3=;; esac;;   # blocks the monitor UA only (per-UA rule)
@@ -113,6 +118,7 @@ case "$MODE" in challenge) code=200 srv=openresty kind=wsc loc= l3=;; ambiguous)
 case "$kind" in cart) { echo '<body class="woocommerce-cart">'; head -c 3000 /dev/zero | tr '\0' a; } >"$o";;
   shop) { echo '<link href="/wp-content/x.css">'; head -c 3000 /dev/zero | tr '\0' a; } >"$o";;
   wsc) { echo '<html><head><title>Please wait... [Imunify360]</title></head><body>imunify360 <script>setTimeout(function(){location.reload()},1500)</script>'; head -c 11900 /dev/zero | tr '\0' b; } >"$o";;
+  cfwsc) { echo '<html><head><title>One moment, please...</title></head><body><script src="/cdn-cgi/challenge-platform/a.js"></script>'; head -c 11900 /dev/zero | tr '\0' c; } >"$o";;
   park) { echo '<html>Parked domain</html>'; head -c 3000 /dev/zero | tr '\0' c; } >"$o";;
   hb) date +%s >"$o";; hbold) echo $(( $(date +%s) - 5000 )) >"$o";; *) : >"$o";; esac
 [ -n "$w" ] && printf '%s 0.1 0.2 198.51.100.4 2 0.01 0.04' "$code"; exit 0
@@ -154,6 +160,9 @@ t inconclusive-no-values-or-paths 0 eval 'cat "$W/out" "$PUBLOG" "$W/sum" | grep
 t inconclusive-control-probes 2 grep -c '^control robots.txt ' "$W/out"
 t inconclusive-control-same-for-both-uas 2 grep -c '^control robots.txt \(monitor-ua\|browser-ua\) http=200 server=openresty origin=0 class=challenge' "$W/out"
 t inconclusive-summary-has-xdiag-and-control 9 grep -c -E '^- (xdiag|control) ' "$W/sum"
+t cf-inconclusive-exit-0 0 wr cfchallenge
+t cf-inconclusive-blocked 7 grep -c '^diag .* verdict=blocked http=200 server=cloudflare origin=0 class=challenge' "$W/out"
+t cf-inconclusive-not-failed-mail 0 grep -c '^::error' "$W/out"
 t uablock-exit-0 0 wr uablock
 t uablock-browser-control-reaches-shop 1 grep -c '^control robots.txt browser-ua http=200 server=LiteSpeed origin=1 class=origin' "$W/out"
 t uablock-monitor-control-blocked 1 grep -c '^control robots.txt monitor-ua .* class=challenge' "$W/out"

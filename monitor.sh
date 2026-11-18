@@ -25,7 +25,10 @@ ts() { date -u +%FT%TZ; }
 #   F_HEAD40, and overwrites $LASTF with a safe fingerprint of this response (no path, no Location, no body; see diag below)
 # Origin evidence = LiteSpeed/PHP/X-Aureo headers or WordPress markers. Normal responses keep `Server: LiteSpeed` through the
 # hoster's openresty front; the Imunify WebShield challenge (2026-10-09, run #154) is answered by openresty itself (~12 KB, 200).
-# F_CLASS: origin | challenge (openresty 200/403/429, no origin evidence) | proxy_5xx (openresty 5xx = backend unreachable) |
+# Cloudflare can also answer before the shop with a ~12 KB "One moment, please" / "Just a moment" interstitial (run #606,
+# 2026-11-18). Treat only a recognisable Cloudflare interstitial as a 200 challenge; an arbitrary Cloudflare 200 remains unknown.
+# F_CLASS: origin | challenge (recognised openresty/Cloudflare challenge, no origin evidence) |
+#          proxy_5xx (openresty/Cloudflare 5xx = backend unreachable) |
 #          transport (no HTTP response) | unknown (anything else: neither provably the shop nor a recognised challenge)
 #   $LASTX gets a second, safe diagnostic line for a challenge/unknown response only (see xdiag below): connection facts, header NAMES,
 #   Content-Type/Date, cookie NAMES, a sanitised <title> and a few boolean body markers. Never a header value beyond those, never a body.
@@ -47,9 +50,15 @@ fetch() {
   { tr -d '\r' <"$h" | grep -qiE '^(x-litespeed-[a-z-]+|x-aureo-[a-z0-9-]+|x-powered-by: *php)'; } && F_ORIGIN=1
   case "$F_SERVER" in [Ll]ite[Ss]peed*) F_ORIGIN=1;; esac
   grep -qE '/wp-content/|/wp-includes/|woocommerce' "$b" && F_ORIGIN=1
+  F_HOST_CHAL=0
+  case "$F_SERVER:$F_CODE" in
+    [Cc]loudflare*:200) grep -qiE '<title[^>]*>[^<]*(one moment|just a moment)|cdn-cgi/challenge-platform|cf-chl-' "$b" && F_HOST_CHAL=1;;
+    [Cc]loudflare*:403|[Cc]loudflare*:429) F_HOST_CHAL=1;;
+  esac
   if [ "$F_CODE" = 000 ]; then F_CLASS=transport; elif [ "$F_ORIGIN" = 1 ]; then F_CLASS=origin
+  elif [ "$F_HOST_CHAL" = 1 ]; then F_CLASS=challenge
   else case "$F_SERVER:$F_CODE" in [Oo]pen[Rr]esty*:200|[Oo]pen[Rr]esty*:403|[Oo]pen[Rr]esty*:429) F_CLASS=challenge;;
-    [Oo]pen[Rr]esty*:5??) F_CLASS=proxy_5xx;; *) F_CLASS=unknown;; esac; fi
+    [Oo]pen[Rr]esty*:5??|[Cc]loudflare*:5??) F_CLASS=proxy_5xx;; *) F_CLASS=unknown;; esac; fi
   local lc=none; case "$F_LOC" in '') ;; */cart/|*/cart-it/|*/cart/\?*|*/cart-it/\?*) lc=cart;; "$BASE"*|/*) lc=same-host;; *) lc=external;; esac
   printf 'http=%s server=%s origin=%s class=%s loc=%s bytes=%s sha8=%s ttfb=%s\n' "$F_CODE" "${F_SERVER:-none}" "$F_ORIGIN" "$F_CLASS" \
     "$lc" "$F_BYTES" "$(sha256sum "$b" | cut -c1-8)" "$F_TTFB" >"$LASTF"
